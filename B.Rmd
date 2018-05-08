@@ -1,0 +1,193 @@
+---
+title: "BikeSharing"
+author: "Xuyang Bai"
+date: "4/30/2018"
+output: pdf_document
+---
+```{r}
+library(ggplot2)
+hour <- read.csv("~/Desktop/Bike sharing/hour.csv")
+day <- read.csv("~/Desktop/Bike sharing/day.csv")
+sum(is.na(hour))
+sum(is.na(day))
+library(caret)
+require(party)
+library(rpart)
+library(rpart.plot)
+library(MASS)
+library(tree)
+library(ggplot2)
+library(dplyr)
+library(RColorBrewer)
+library(ggthemes)
+library(ggrepel)
+library(gridExtra)
+library(lubridate)
+
+#Feature selection
+library(glmnet)
+model_z <-model.matrix(~ as.factor(yr)+as.factor(holiday)*as.factor(weekday)*as.factor(workingday)
+                        +as.factor(mnth)*as.factor(season)*as.factor(weathersit)*hum*windspeed,
+                       data=day)[,-1]
+
+# Violent crime
+y<-day$cnt
+x<-day$atemp
+
+cnt_ols <- lm(y~x+model_z)
+summary(cnt_ols)
+
+# 4.) Use post-double-LASSO to develop more appropriate set of control variables
+# LASSO on y
+ylasso<-cv.glmnet(model_z,y,alpha=1)
+# Coefficients for best (lowest CV MSE) lambda
+y.z<-coef(ylasso,ylasso$lambda.min)
+
+
+# Save coefficients that are non-zero
+lasso_y <- as.matrix(y.z)
+#get names of each non-zero coeff
+y.znames <- rownames(lasso_y)[lasso_y!=0]
+y.znames
+
+# LASSO on x (same procedure by on X)
+xlasso <- cv.glmnet(model_z,x,alpha=1)
+x.z<-coef(xlasso,xlasso$lambda.min)
+lasso_x <- as.matrix(x.z)
+x.znames<-rownames(lasso_x)[lasso_x!=0]
+x.znames
+# Combine the variables selected in each LASSO
+z <- union(x.znames, y.znames)
+z <-z[z!="(Intercept)"]
+z
+# Combined post-double-LASSO model
+model_lasso <-paste("y~x+",paste(z,collapse="+"))
+
+# Reformat model string
+mod1 <- strsplit(model_lasso,"")[[1]]
+for (i in 1:length(mod1)){
+  if (mod1[i]=="("|mod1[i]==")"|mod1[i]==","|mod1[i]=="^"|mod1[i]=="="|(mod1[i]==" "&& i>5)|mod1[i]==":"){
+    mod1[i]="."
+  }
+}
+model_lasso2 <-paste(mod1, collapse="")
+
+# You have to create another data.frame for R to reference
+z1 <- cbind(y,x,model_z)
+z1 <- data.frame(z1)
+# Estimate post-double-LASSO
+pd_lasso <-lm(model_lasso2,data=z1)
+summary(pd_lasso)
+names(coef(pd_lasso))
+```
+
+
+
+4. Modeling
+4.1 Predicting total number of bike rental(cnt) mainly in SPSS 
+Split train test
+```{r}
+set.seed(3456)
+trainIndex <- createDataPartition(hour$cnt, p = .7, 
+                                  list = FALSE, 
+                                  times = 1)
+hourTrain <- hour[ trainIndex,]
+hourTest  <- hour[-trainIndex,]
+names(hour)
+```
+
+Predict total count use Simple regression tree 
+```{r}
+cart <- tree(cnt~factor(season)+factor(yr)+factor(mnth)+factor(hr)+factor(holiday)+factor(weekday)+factor(workingday)+factor(weathersit)+temp+atemp+hum+windspeed , data = hourTrain)
+summary(cart)
+plot(cart)
+text(cart,pretty=0)
+cv.P=cv.tree(cart)
+summary(cv.P)
+prune.P=prune.tree(cart,best=5)
+plot(prune.P)
+text(prune.P,pretty=0)
+yhat=predict(cart,newdata=hourTest)
+print(MSETree<-mean((yhat-day$cnt)^2))
+```
+
+
+4.2 Clusterting mainly in SPSS
+```{r}
+# 3 Cluster for hour 
+library(readxl)
+hour_cluster <- read_excel("hour,cluster.xlsx")
+#FM<-na.omit(FM)
+d <- dist(hour_cluster, method = "euclidean")
+fit <- hclust(d, method="ward.D")
+plot(fit)
+rect.hclust(fit, k=3, border="red")
+```
+
+4.3 Time series analysis
+Use time series to predict future 1 day total count/registered/casual
+```{r}
+library(readxl)
+library(zoo)
+library(ggfortify)
+CntDay <- read_excel("~/Desktop/Bike sharing/total count per day.xlsx")
+CntDay  <-zoo(CntDay$cnt, order.by=as.Date(as.Date(CntDay$dteday), format='%m/%d/%Y'))
+CntDay<-ts(CntDay)
+class(CntDay)
+autoplot(CntDay,ts.colour = 'green') + xlab("Date")+ylab("Total count of bike rentals") + ggtitle("The Time Series of total count")
+```
+periodic, 24 hour seasonal
+ACF: AR exist for seasonal and nonseasonal
+PACF: seasonal is only related last 1 day
+SARIMA200 24
+SARIMA100 24
+
+Total count
+```{r}
+library(readxl)
+library(astsa)
+hourTS <- read_excel("hourTS.xlsx")
+View(hourTS)
+Cnt <- ts(hourTS$cnt,frequency = 24)
+acf2(Cnt)
+sarima
+SARIMA200<-sarima(Cnt, 2,0,0,1,0,0,24)
+SARIMA300<-sarima(Cnt, 3,0,0,1,0,0,24)
+#Best model
+SARIMA100<-sarima(Cnt, 1,0,1,4,0,1,24)
+summary(SARIMA100)
+Forecast<-sarima.for(Cnt,24,1,0,1,4,0,1,24)
+Forecast
+```
+
+```{r}
+library(Hmisc)
+lm1<-lm(Cnt~Lag(Cnt,1)+Lag(Cnt,24)+hourTS$atemp+as.factor(hourTS$yr)+as.factor(hourTS$holiday)*as.factor(hourTS$weekday)*as.factor(hourTS$workingday)+as.factor(hourTS$mnth)*as.factor(hourTS$season)*as.factor(hourTS$weathersit)*hourTS$hum*hourTS$windspeed,data=hourTS)
+summary(lm1)
+```
+
+casual
+```{r}
+casual <- ts(hourTS$casual,frequency = 24)
+acf2(casual)
+#Best model
+SARIMA100<-sarima(casual, 1,0,2,3,0,2,24)
+```
+```{r}
+summary(SARIMA100)
+Forecast<-sarima.for(casual,24,1,0,2,3,0,2,24)
+Forecast
+```
+```{r}
+lm2<-lm(casual~Lag(Cnt,1)+Lag(Cnt,24)+hourTS$atemp+as.factor(hourTS$yr)+as.factor(hourTS$holiday)*as.factor(hourTS$weekday)*as.factor(hourTS$workingday)+as.factor(hourTS$mnth)*as.factor(hourTS$season)*as.factor(hourTS$weathersit)*hourTS$hum*hourTS$windspeed,data=hourTS)
+summary(lm2)
+```
+
+registered
+```{r}
+registered <- ts(hourTS$registered,frequency = 24)
+acf2(registered)
+```
+
+
+
